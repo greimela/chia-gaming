@@ -1,6 +1,11 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
-import { HUB_TRUST_CHANNEL, type HubTrustOutcome } from '../shared/ipc';
+import {
+  HUB_TRUST_CHANNEL,
+  PEAR_MESSAGE_CHANNEL,
+  PEAR_SEND_CHANNEL,
+  type HubTrustOutcome,
+} from '../shared/ipc';
 
 /**
  * Sub-frames are remote content — the hub lobby UI and the WalletConnect Verify
@@ -22,5 +27,29 @@ if (window === window.top) {
   contextBridge.exposeInMainWorld('__chiaHub', {
     requestTrust: (origin: string): Promise<HubTrustOutcome> =>
       ipcRenderer.invoke(HUB_TRUST_CHANNEL, origin) as Promise<HubTrustOutcome>,
+  });
+
+  // SPIKE: dev-only simulator (see networkPolicy.ts devSimulatorOrigins).
+  const devSimulatorUrl = process.env.CHIA_GAMING_DEV_SIMULATOR_URL;
+  if (devSimulatorUrl) {
+    const ws = new URL(devSimulatorUrl);
+    ws.protocol = ws.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws.pathname = '/ws';
+    contextBridge.exposeInMainWorld('__SIM_URL__', devSimulatorUrl);
+    contextBridge.exposeInMainWorld('__SIM_WS_URL__', ws.toString());
+    contextBridge.exposeInMainWorld('__chiaDevSimulator', true);
+  }
+
+  // The Pear lobby worker: JSON strings in both directions, brokered by main.
+  contextBridge.exposeInMainWorld('__chiaPear', {
+    send: (message: string): Promise<boolean> =>
+      ipcRenderer.invoke(PEAR_SEND_CHANNEL, message) as Promise<boolean>,
+    onMessage: (listener: (message: string) => void): (() => void) => {
+      const wrapped = (_event: unknown, message: string): void => listener(message);
+      ipcRenderer.on(PEAR_MESSAGE_CHANNEL, wrapped);
+      return () => {
+        ipcRenderer.removeListener(PEAR_MESSAGE_CHANNEL, wrapped);
+      };
+    },
   });
 }

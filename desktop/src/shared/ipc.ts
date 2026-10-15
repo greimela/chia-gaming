@@ -12,3 +12,12 @@ export const HUB_TRUST_CHANNEL = 'chia-gaming:request-hub-trust';
  * - `persist-failed` valid origin that could not be saved for the required reload.
  */
 export type HubTrustOutcome = 'trusted' | 'granted' | 'invalid' | 'persist-failed';
+
+/**
+ * Renderer-to-worker: one JSON command for the Pear lobby worker
+ * (`workers/main.cjs`). Main forwards the string and decides nothing.
+ */
+export const PEAR_SEND_CHANNEL = 'chia-gaming:pear-send';
+
+/** Worker-to-renderer: one JSON message from the Pear lobby worker. */
+export const PEAR_MESSAGE_CHANNEL = 'chia-gaming:pear-message';

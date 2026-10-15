@@ -77,15 +77,125 @@ Cloud Wallet OAuth uses that same custom-scheme origin as `redirect_uri`
 document at that path so the callback page can `postMessage` the authorization
 code to the opener. The Cloud Wallet OAuth client must allow that redirect URI.
 
+## Peer-to-peer lobby (Pear spike)
+
+**Spike.** The desktop app can play without any hub server. The hub picker
+offers "Join peer-to-peer lobby", and the app then uses the worker pattern from
+Holepunch's `hello-pear-electron` template.
+
+```
+renderer (PearHubConnection, PearLobby)
+  ⇅ window.__chiaPear  (preload; main frame only)
+main (src/main/pearWorker.ts — broker only, decides nothing)
+  ⇅ framed IPC pipe (pear-runtime → bare-sidecar)
+Bare worker (workers/main.cjs — IPC glue + Pear updater)
+  └ workers/lobby.cjs — presence gossip, challenges, game relay
+  ⇅ Noise-encrypted Hyperswarm connections
+other players' workers
+```
+
+- **Lobby topic.** Every player joins one well-known Hyperswarm topic per
+  network (`mainnet`, `testnet`, or `simulator` for dev). Players keep a
+  bounded number of lobby connections instead of a full mesh:
+  - Hyperswarm dials the lobby peers it discovers, capped by
+    `maxClientConnections` (6). Other players' dials add about as many
+    incoming connections.
+  - Above 20 unprotected connections, a player prunes its best-connected
+    neighbour. The `prune` message makes both ends stop redialling.
+  - Connections that carry a challenge or a game are never pruned, and
+    neither are connections younger than 15 s.
+- **Presence gossip.** Each player signs a small presence entry with its
+  Hyperswarm key: alias, busy, preferred buy-in, and a "gone" flag on leaving.
+  - Players republish their entry every 20 s, and entries expire 70 s after
+    their signed timestamp.
+  - Neighbours forward entries. A change (busy, alias, buy-in, leaving) goes
+    to every neighbour; a plain refresh goes to 6 random neighbours.
+  - A new neighbour receives the full set of live entries.
+  - Entries are verified before they are stored or forwarded. Stale or
+    far-future timestamps are rejected, so a peer cannot forge, alter or
+    replay another player's presence.
+  - Everyone sees everyone who is online without being connected to them.
+- **Challenges.** A player you see but are not connected to is dialled by
+  public key (`joinPeer`). Open challenges are re-sent on every new connection
+  to that player, because a first connection can look open while dead (a
+  failed relay; Hyperswarm notices after about 13 s and redials). The receiver
+  de-duplicates them by id.
+- **Hub role.** For the renderer, the worker acts as a local hub. It sends
+  the same events as the hub's game socket: `registered`, `advisory_start`,
+  `relay`, `delivery_failure`, `peer_available`, `peer_unavailable`,
+  `alias_updated` and `hub_attention`. `PearHubConnection` maps them onto
+  `HubConnectionCallbacks`. As a result, the session, reliable-frame and
+  restore code above it is the same code the hub path uses.
+- **Identity.** The worker derives its Hyperswarm keypair from the per-origin
+  hub session credential (origin `pear://lobby`). A player id is `p_` plus
+  the first 16 bytes of that public key. A restarted app therefore rejoins as
+  the same player, and its live channel resumes.
+- **Trust.** Everything a remote peer sends is validated in the worker before
+  it is forwarded. Authority still comes from the channel handshake, as with
+  the hub. Unlike hub relaying, relayed frames are end-to-end encrypted.
+- **OTA updates.** The worker wires `pear-runtime`'s updater exactly as
+  `hello-pear-worker` does. It stays off because no `pear://` upgrade link has
+  been provisioned (`pear touch` / stage / multisig).
+
+### What the spike does not do
+
+- **Packaging.** Only `pnpm start` (dev) runs the worker.
+  `electron-builder.config.cjs` ships no `node_modules`, keeps everything in
+  asar and sets `onlyLoadAppFromAsar`. A packaged build would need the worker,
+  its dependencies and the per-platform `bare` binary unpacked outside the
+  asar. Holepunch's template disables asar for this reason.
+- **NAT fallback.** There is no blind relay. Players behind symmetric NAT on
+  both sides cannot connect.
+- **Bootstrap nodes.** Discovery uses the public HyperDHT bootstrap nodes.
+- **Spam and fake players.** Keys are free, so anyone can flood the lobby
+  with fake players. Beyond per-peer caps on pending challenges and message
+  sizes, nothing prevents this yet. Options are proof-of-work on presence
+  entries, or a signature showing control of a coin worth at least the buy-in.
+- **Hyperswarm internals.** Two Hyperswarm internals are relied on:
+  `_attemptClientConnections()`, which has no public way to re-drain the dial
+  queue after raising the cap, and the retry timer honouring
+  `PeerInfo.reconnect(false)`.
+
+### Load test
+
+`pnpm --filter chia-gaming-desktop run test:lobby` runs the lobby tests on a
+local HyperDHT testnet. `run loadtest:lobby [players] [joinsPerSecond]` runs N
+lobbies in one process with the real timings. Measured on one laptop:
+
+| Players | Everyone sees everyone | Connections / node (avg, max) | Inbound / node, steady | Clean leave seen everywhere | Abrupt leave |
+| ------- | ---------------------- | ----------------------------- | ---------------------- | --------------------------- | ------------ |
+| 100     | 0.6 s after last join  | 11.6, 29                      | ~10 KB/s               | 0.7 s                       | ≈ TTL (70 s) |
+| 300     | 1.6 s after last join  | 11.9, 37                      | ~28 KB/s               | 1.4 s                       | ≈ TTL (70 s) |
+
+Steady-state traffic grows linearly with the number of players: every player
+refreshes every 20 s, and everyone receives every refresh. Expect roughly
+100 KB/s per node at 1,000 players. Beyond that, the next steps are a longer
+refresh and TTL, a binary encoding, and digest-based sync instead of full
+re-sends.
+
+### Dev: two instances against the simulator
+
+The simulator is hidden in desktop builds. To drive a whole game without a
+wallet, set `CHIA_GAMING_DEV_SIMULATOR_URL` on an unpackaged run. Packaged
+builds clear it. With it set, the simulator origin is allowed and the
+"Continue with Simulator" button appears. `--user-data-dir` gives each
+instance its own profile and single-instance lock:
+
+```bash
+./target/debug/chia-gaming-sim &
+CHIA_GAMING_DEV_SIMULATOR_URL=http://127.0.0.1:5800 pnpm --filter chia-gaming-desktop exec electron . --user-data-dir=/tmp/cg-a
+CHIA_GAMING_DEV_SIMULATOR_URL=http://127.0.0.1:5800 pnpm --filter chia-gaming-desktop exec electron . --user-data-dir=/tmp/cg-b
+```
+
 ## Configuration
 
 Optional JSON file at `<userData>/config.json`, where `<userData>` is
 `~/Library/Application Support/Chia Gaming` on macOS,
 `%APPDATA%\Chia Gaming` on Windows, and `~/.config/Chia Gaming` on Linux.
 
-| Key                  | Default                                                                                                | Meaning                                                                 |
-| -------------------- | ------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------- |
-| `hubOrigins`         | `["http://localhost:3003", "http://127.0.0.1:3003"]`                                                   | Hub origins the app may load and connect to                             |
+| Key                  | Default                                                                                                                    | Meaning                                                                 |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `hubOrigins`         | `["http://localhost:3003", "http://127.0.0.1:3003"]`                                                                       | Hub origins the app may load and connect to                             |
 | `cloudWalletOrigins` | `["https://api.vault.chia.net", "https://vault.chia.net", "https://api.vault.chiatest.net", "https://vault.chiatest.net"]` | Cloud Wallet API and UI origins for OAuth, GraphQL, and approval popups |
 
 Anything invalid is reported in an error dialog and the app exits rather than
@@ -105,8 +215,10 @@ allow `chiagaming://app/oauth/callback` as a redirect URI). A hub grant writes
 
 ### Process isolation
 
-The renderer has no Node.js reachable from it at all, and the IPC surface is a
-single channel described under [Hub trust](#hub-trust).
+The renderer has no Node.js reachable from it at all. The IPC surface is the
+hub-trust channel described under [Hub trust](#hub-trust) plus the two Pear
+lobby channels described under
+[Peer-to-peer lobby (Pear spike)](#peer-to-peer-lobby-pear-spike).
 
 | Setting                       | Value                                                                     |
 | ----------------------------- | ------------------------------------------------------------------------- |

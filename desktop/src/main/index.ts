@@ -15,9 +15,14 @@ import { loadDesktopConfig, type DesktopConfig } from './config';
 import { installHubTrustHandler } from './hubTrust';
 import { log } from './log';
 import { createMainWindow } from './mainWindow';
+import { installPearWorker } from './pearWorker';
 import { buildNetworkPolicy, type PolicyRef } from './networkPolicy';
 import { installSessionSecurity, installWebContentsSecurity } from './security';
 import { installProcessTransportSecurity } from './transportSecurity';
+
+if (app.isPackaged) {
+  delete process.env.CHIA_GAMING_DEV_SIMULATOR_URL;
+}
 
 // These have to happen before the 'ready' event.
 installProcessTransportSecurity(app.commandLine);
@@ -80,6 +85,7 @@ if (!app.requestSingleInstanceLock()) {
 
   installWebContentsSecurity(policy);
   installHubTrustHandler(config, policy);
+  installPearWorker();
 
   // The window is looked up in the live list rather than held in a variable: a
   // saved handle would be a destroyed BrowserWindow after a close, and every
